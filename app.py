@@ -2,11 +2,11 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-# 1. Page Configuration (Makes it look great on a phone browser)
-st.set_page_config(page_title="My AI OS", page_icon="🧠", layout="centered")
+# 1. Page Configuration for Mobile
+st.set_page_config(page_title="My Personal OS", page_icon="🧠", layout="centered")
 st.title("🧠 Personal AI Companion")
 
-# 2. Initialize Memory (Session State)
+# 2. Initialize Memory (Session State Defaults)
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "api_key" not in st.session_state:
@@ -14,74 +14,82 @@ if "api_key" not in st.session_state:
 if "user_context" not in st.session_state:
     st.session_state.user_context = "I am an electronics and communications engineering student in Bangalore (6th sem). I want to become rich and happy. I like hardware projects."
 
-# 3. The Sidebar (Where you paste your ChatGPT context)
+# 3. The Sidebar Control Center
 with st.sidebar:
-    st.header("⚙️ Brain Settings")
+    st.header("⚙️ Brain Control Center")
     
     # Secure API Key input
     api_key_input = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key)
     if api_key_input:
         st.session_state.api_key = api_key_input
         
-    st.subheader("👤 Your Profile (Context)")
-    st.caption("Paste your full ChatGPT context here. The AI reads this before every reply.")
-    
-    # Text area for the master context
-    context_input = st.text_area("Who are you?", value=st.session_state.user_context, height=300)
-    if st.button("Save Profile"):
+    st.subheader("👤 Master Profile")
+    context_input = st.text_area("Who are you?", value=st.session_state.user_context, height=200)
+    if st.button("Save Profile Updates"):
         st.session_state.user_context = context_input
-        st.success("Context secured!")
+        st.success("Profile updated in session!")
 
-# 4. Render the Chat History on screen
+    st.write("---")
+    st.subheader("🛠️ Behavioral Toggles")
+    
+    # TOGGLE 1: Access Context
+    use_context = st.toggle("Inject Profile Context", value=True, 
+                            help="When ON, the AI reads your master profile before answering. When OFF, the AI acts as a generic assistant.")
+    
+    # TOGGLE 2: Mutate Context
+    allow_mutation = st.toggle("Allow Profile Evolution", value=True, 
+                               help="When ON, the AI will actively analyze your inputs and ask to modify or update your master profile context.")
+
+# 4. Render Chat History
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 5. The Chat Input box (Fixed to the bottom of your phone screen)
+# 5. Handle Conversations
 if prompt := st.chat_input("Ask a question, or share a new thought..."):
     
-    # Display user's new message
+    # Display user's message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 6. Generate the AI Response
     if not st.session_state.api_key:
         st.error("⚠️ Please enter your API Key in the sidebar menu first.")
     else:
         with st.chat_message("model"):
-            with st.spinner("Thinking..."):
+            with st.spinner("Processing..."):
                 try:
                     client = genai.Client(api_key=st.session_state.api_key)
                     
-                    # The System Instructions (Rules for the AI)
-                    system_instruction = f"""
-                    You are an elite, highly personalized AI companion. 
-                    Here is the master context about the user:
-                    {st.session_state.user_context}
+                    # Dynamically build system instructions based on your toggles
+                    base_instruction = "You are an elite, highly personalized AI companion. Answer conversationally and match the user's energy."
                     
-                    RULES:
-                    1. Answer conversationally, mirroring the user's energy.
-                    2. ALWAYS tailor your advice using their master context.
-                    3. If the user mentions a new interest, goal, project, or fact about themselves that isn't in their master context, explicitly ask them at the end of your reply: "Would you like me to remind you to add this to your sidebar profile?"
-                    """
-                    
-                    # Combine history and current prompt so it remembers the flow
+                    if use_context:
+                        base_instruction += f"\n\nHere is the master context about the user to tailor your advice:\n{st.session_state.user_context}"
+                    else:
+                        base_instruction += "\n\nNOTE: The user has disabled profile context tracking for this message. Respond generally without referencing their background details unless they bring them up explicitly."
+                        
+                    if allow_mutation:
+                        base_instruction += "\n\nCRITICAL RULE: If the user mentions a significant new interest, project, or detail about themselves, explicitly ask at the end of your response if they would like to add this to their master context profile."
+                    else:
+                        base_instruction += "\n\nCRITICAL RULE: Do NOT ask or suggest modifying the profile context. The user has locked mutations."
+
+                    # Grab recent history context
                     conversation_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]])
                     final_prompt = f"Previous Chat:\n{conversation_history}\n\nCurrent Request:\n{prompt}"
                     
-                    # Call the API
+                    # Request generation
                     response = client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=final_prompt,
                         config=types.GenerateContentConfig(
-                            system_instruction=system_instruction
+                            system_instruction=base_instruction
                         )
                     )
                     
-                    # Display and save the response
+                    # Display and log the result
                     st.markdown(response.text)
                     st.session_state.messages.append({"role": "model", "content": response.text})
                     
                 except Exception as e:
-                    st.error(f"Something went wrong: {e}")
+                    st.error(f"Execution Error: {e}")
