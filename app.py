@@ -2,6 +2,27 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
+# --- SECURITY GATE ---
+def check_password():
+    if "password_entered" not in st.session_state:
+        st.session_state.password_entered = False
+
+    if not st.session_state.password_entered:
+        st.warning("🔒 Secure Boot Sequence Initiated.")
+        password = st.text_input("Enter Access Code", type="password")
+        
+        # Checks against the encrypted Streamlit vault
+        if password == st.secrets["APP_PASSWORD"]:
+            st.session_state.password_entered = True
+            st.rerun()
+        elif password:
+            st.error("Access Denied.")
+            
+        st.stop() # Instantly halts all code execution if password fails
+
+check_password()
+
+# ... (The rest of your original app code goes here) ...
 # 1. Page Configuration for Mobile
 st.set_page_config(page_title="My Personal OS", page_icon="🧠", layout="centered")
 st.title("🧠 Personal AI Companion")
