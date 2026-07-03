@@ -1,31 +1,39 @@
 import streamlit as st
 from google import genai
 from google.genai import types
-from gtts import gTTS
 import json
 import os
 import io
 import matplotlib.pyplot as plt
 from docx import Document
 from docx.shared import Inches
+from supabase import create_client, Client
 
-# --- STORAGE ARCHITECTURE ---
-PROFILE_DB = "user_profiles.json"
+# --- INITIAL SUPABASE CLOUD CONNECTION ---
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def load_profiles():
-    if os.path.exists(PROFILE_DB):
-        try:
-            with open(PROFILE_DB, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+def load_profile_from_db(profile_key):
+    try:
+        response = supabase.table("user_profiles").select("*").eq("profile_key", profile_key).execute()
+        if response.data:
+            return response.data[0]
+    except Exception as e:
+        st.error(f"Cloud DB Read Error: {e}")
+    return None
 
-def save_profiles(profiles):
-    with open(PROFILE_DB, "w") as f:
-        json.dump(profiles, f, indent=4)
-
-profiles = load_profiles()
+def save_profile_to_db(profile_key, api_key, context, research_projects):
+    try:
+        payload = {
+            "profile_key": profile_key,
+            "api_key": api_key,
+            "context": context,
+            "research_projects": research_projects
+        }
+        supabase.table("user_profiles").upsert(payload).execute()
+    except Exception as e:
+        st.error(f"Cloud DB Write Error: {e}")
 
 # --- INITIAL APP CONFIG ---
 st.set_page_config(page_title="Personal AI OS v3", page_icon="🧠", layout="centered")
@@ -36,6 +44,7 @@ if "authenticated_profile" not in st.session_state:
     st.session_state.authenticated_profile = None
     st.session_state.current_key = ""
     st.session_state.current_context = ""
+    st.session_state.research_projects = {}
 
 if st.session_state.authenticated_profile is None:
     st.subheader("🔒 Secure Profile Gateway")
@@ -43,34 +52,22 @@ if st.session_state.authenticated_profile is None:
     
     if st.button("Unlock / Initialize Workspace"):
         if entered_password:
-            if entered_password in profiles:
+            db_record = load_profile_from_db(entered_password)
+            if db_record:
                 st.session_state.authenticated_profile = entered_password
-                st.session_state.current_key = profiles[entered_password].get("api_key", "")
-                st.session_state.current_context = profiles[entered_password].get("context", "")
+                st.session_state.current_key = db_record.get("api_key", "")
+                st.session_state.current_context = db_record.get("context", "")
+                st.session_state.research_projects = db_record.get("research_projects", {})
             else:
-                profiles[entered_password] = {
-                    "api_key": "",
-                    "context": "Initialize your custom background here...",
-                    "research_projects": {}
-                }
-                save_profiles(profiles)
+                initial_projects = {}
+                save_profile_to_db(entered_password, "", "Initialize your custom background here...", initial_projects)
                 st.session_state.authenticated_profile = entered_password
                 st.session_state.current_key = ""
                 st.session_state.current_context = "Initialize your custom background here..."
-            
-            # Ensure research projects dictionary exists
-            if "research_projects" not in profiles[st.session_state.authenticated_profile]:
-                profiles[st.session_state.authenticated_profile]["research_projects"] = {}
-                save_profiles(profiles)
-                
+                st.session_state.research_projects = initial_projects
             st.session_state.messages = []
             st.rerun()
     st.stop()
-
-# Load specific workspace reference data
-user_record = profiles[st.session_state.authenticated_profile]
-if "research_projects" not in user_record:
-    user_record["research_projects"] = {}
 
 # --- SIDEBAR ACCESSORIES & CONTROLS ---
 with st.sidebar:
@@ -80,33 +77,20 @@ with st.sidebar:
     context_input = st.text_area("Master Persona Context", value=st.session_state.current_context, height=120)
     
     if st.button("💾 Save Settings Permanently"):
-        profiles[st.session_state.authenticated_profile]["api_key"] = api_key_input
-        profiles[st.session_state.authenticated_profile]["context"] = context_input
-        save_profiles(profiles)
+        save_profile_to_db(st.session_state.authenticated_profile, api_key_input, context_input, st.session_state.research_projects)
         st.session_state.current_key = api_key_input
         st.session_state.current_context = context_input
-        st.success("Cloud database updated!")
+        st.success("Indestructible Cloud Database Updated!")
         
     st.write("---")
-    
     st.subheader("🏎️ Cognitive Architecture")
-    architecture = st.selectbox(
-        "Choose Engine Strategy:",
-        ["Standard Conversation", "Multi-Agent Critic Loop", "IEEE Research Engine"]
-    )
-    
-    st.write("---")
-    st.subheader("🌐 Global Modalities")
-    enable_grounding = st.toggle("Enable Live Google Search", value=False)
-    enable_voice_output = st.toggle("Enable Text-to-Speech", value=False)
+    architecture = st.selectbox("Choose Engine Strategy:", ["Standard Conversation", "Multi-Agent Critic Loop", "IEEE Research Engine"])
     
     if st.button("🚪 Lock Workspace"):
         st.session_state.authenticated_profile = None
         st.rerun()
 
 # --- ARCHITECTURE ROUTING ---
-
-# ROUTE 1 & 2: CONVERSATIONAL AND CRITIC MODES
 if architecture != "IEEE Research Engine":
     st.subheader("📁 Hardware & Datasheet Vision")
     uploaded_file = st.file_uploader("Drop PDF datasheets, schematics, or reference materials here", type=["pdf", "png", "jpg", "jpeg"])
@@ -137,8 +121,6 @@ if architecture != "IEEE Research Engine":
                 try:
                     client = genai.Client(api_key=st.session_state.current_key)
                     system_instruction = f"You are an elite AI companion. Context:\n{st.session_state.current_context}"
-                    
-                    active_tools = [types.Tool(google_search=types.GoogleSearch())] if enable_grounding else []
                     contents_payload = []
                     
                     if audio_input:
@@ -153,7 +135,7 @@ if architecture != "IEEE Research Engine":
                         response = client.models.generate_content(
                             model='gemini-2.5-flash',
                             contents=contents_payload,
-                            config=types.GenerateContentConfig(system_instruction=system_instruction, tools=active_tools)
+                            config=types.GenerateContentConfig(system_instruction=system_instruction)
                         )
                         output_text = response.text
                         st.markdown(output_text)
@@ -161,83 +143,71 @@ if architecture != "IEEE Research Engine":
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-# ROUTE 3: INTERACTIVE IEEE RESEARCH PAPERS INTERVIEWER
 else:
     st.subheader("🎓 Strict IEEE Research Engine")
     
-    # Select or create project identity
-    project_names = list(user_record["research_projects"].keys())
+    project_names = list(st.session_state.research_projects.keys())
     project_selection = st.selectbox("Select Research Project Workspace:", ["-- Create New Project --"] + project_names)
     
     if project_selection == "-- Create New Project --":
         new_name = st.text_input("Enter New Project Title / Name:")
         if st.button("➕ Initialize Project Space"):
-            if new_name and new_name not in user_record["research_projects"]:
-                user_record["research_projects"][new_name] = {
+            if new_name and new_name not in st.session_state.research_projects:
+                st.session_state.research_projects[new_name] = {
                     "abstract_details": "",
                     "introduction_points": "",
                     "hardware_methodology": "",
                     "experimental_results": "",
                     "conclusion_points": ""
                 }
-                save_profiles(profiles)
-                st.success(f"Workspace for '{new_name}' generated! Select it from the menu above.")
+                save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+                st.success(f"Workspace for '{new_name}' generated!")
                 st.rerun()
         st.stop()
         
-    # Active research context loading
-    active_project = user_record["research_projects"][project_selection]
-    
+    active_project = st.session_state.research_projects[project_selection]
     st.info(f"📍 Active Project: **{project_selection}**")
-    st.write("Complete the core data modules below. The IEEE paper engine remains locked until all fields contain information.")
     
-    # Step-by-Step Data Inputs
     with st.expander("📝 Step 1: Abstract & Objectives", expanded=not bool(active_project["abstract_details"])):
-        abs_in = st.text_area("What problem does this project solve, and what is the primary objective?", 
-                              value=active_project["abstract_details"], key="abs_in")
+        abs_in = st.text_area("What problem does this project solve?", value=active_project["abstract_details"], key="abs_in")
         if st.button("Save Step 1 Data"):
-            active_project["abstract_details"] = abs_in
-            save_profiles(profiles)
-            st.success("Saved Step 1 data.")
+            st.session_state.research_projects[project_selection]["abstract_details"] = abs_in
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            st.success("Saved Step 1 data to Cloud.")
             st.rerun()
             
-    with st.expander("📚 Step 2: Introduction & Background Literature", expanded=bool(active_project["abstract_details"]) and not bool(active_project["introduction_points"])):
-        intro_in = st.text_area("What technologies/prior works are you using? (e.g., U-Net, ESP32, OpenCV) Provide any background context.", 
-                               value=active_project["introduction_points"], key="intro_in")
+    with st.expander("📚 Step 2: Introduction & Background", expanded=bool(active_project["abstract_details"]) and not bool(active_project["introduction_points"])):
+        intro_in = st.text_area("What technologies/prior works are you using?", value=active_project["introduction_points"], key="intro_in")
         if st.button("Save Step 2 Data"):
-            active_project["introduction_points"] = intro_in
-            save_profiles(profiles)
-            st.success("Saved Step 2 data.")
+            st.session_state.research_projects[project_selection]["introduction_points"] = intro_in
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            st.success("Saved Step 2 data to Cloud.")
             st.rerun()
             
-    with st.expander("🛠️ Step 3: Hardware Design & System Methodology", expanded=bool(active_project["introduction_points"]) and not bool(active_project["hardware_methodology"])):
-        hw_in = st.text_area("Detail your system architecture. Explain your connections, pins, models, and precise workflows step-by-step.", 
-                             value=active_project["hardware_methodology"], key="hw_in")
+    with st.expander("🛠️ Step 3: Architecture & Methodology", expanded=bool(active_project["introduction_points"]) and not bool(active_project["hardware_methodology"])):
+        hw_in = st.text_area("Detail your system architecture. Explain your connections, integrated hardware-software systems, Edge AI models, MATLAB optimization scripts, and precise workflows step-by-step.", value=active_project["hardware_methodology"], key="hw_in")
         if st.button("Save Step 3 Data"):
-            active_project["hardware_methodology"] = hw_in
-            save_profiles(profiles)
-            st.success("Saved Step 3 data.")
+            st.session_state.research_projects[project_selection]["hardware_methodology"] = hw_in
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            st.success("Saved Step 3 data to Cloud.")
             st.rerun()
             
-    with st.expander("📊 Step 4: Experimental Data & Results Metrics", expanded=bool(active_project["hardware_methodology"]) and not bool(active_project["experimental_results"])):
-        res_in = st.text_area("What are your numerical results or outputs? (e.g., accuracy percentages, timings, hardware power efficiency numbers)", 
-                             value=active_project["experimental_results"], key="res_in")
+    with st.expander("📊 Step 4: Experimental Data & Metrics", expanded=bool(active_project["hardware_methodology"]) and not bool(active_project["experimental_results"])):
+        res_in = st.text_area("What are your numerical results or outputs?", value=active_project["experimental_results"], key="res_in")
         if st.button("Save Step 4 Data"):
-            active_project["experimental_results"] = res_in
-            save_profiles(profiles)
-            st.success("Saved Step 4 data.")
+            st.session_state.research_projects[project_selection]["experimental_results"] = res_in
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            st.success("Saved Step 4 data to Cloud.")
             st.rerun()
             
-    with st.expander("🏁 Step 5: Conclusions & Future Scope", expanded=bool(active_project["experimental_results"]) and not bool(active_project["conclusion_points"])):
-        con_in = st.text_area("What is the final takeaway? What upgrades are planned for the future?", 
-                             value=active_project["conclusion_points"], key="con_in")
+    with st.expander("🏁 Step 5: Conclusions", expanded=bool(active_project["experimental_results"]) and not bool(active_project["conclusion_points"])):
+        con_in = st.text_area("What is the final takeaway?", value=active_project["conclusion_points"], key="con_in")
         if st.button("Save Step 5 Data"):
-            active_project["conclusion_points"] = con_in
-            save_profiles(profiles)
-            st.success("Saved Step 5 data.")
+            st.session_state.research_projects[project_selection]["conclusion_points"] = con_in
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            st.success("Saved Step 5 data to Cloud.")
             st.rerun()
 
-    # --- VALIDATION ENGINE ---
     ready_to_compile = all([
         active_project["abstract_details"].strip(),
         active_project["introduction_points"].strip(),
@@ -250,24 +220,21 @@ else:
     st.subheader("🚀 Document Synthesis Control")
     
     if not ready_to_compile:
-        st.warning("🔒 Compilation Locked. Please provide operational data for all 5 development modules above before generating the paper.")
+        st.warning("🔒 Compilation Locked. Please complete all 5 modules.")
     else:
         st.success("🔓 Data complete! You can now activate the paper synthesis matrix.")
         
-        # The requested compilation switch
         paper_ready_toggle = st.toggle("✨ ACTIVATE IEEE PAPER READY STATUS", value=False)
         
         if paper_ready_toggle:
             if not st.session_state.current_key:
-                st.error("Please ensure your Gemini API Key is entered in the left sidebar configuration panel.")
+                st.error("Please enter your Gemini API Key in the left sidebar.")
             else:
                 if st.button("🔥 Compile Official IEEE Academic Document"):
                     try:
                         client = genai.Client(api_key=st.session_state.current_key)
-                        
                         with st.status("Initiating Strict Academic Compilation...", expanded=True) as status:
                             
-                            # Build context block from gathered inputs
                             raw_project_context = f"""
                             PROJECT TITLE: {project_selection}
                             ABSTRACT CORE DATA: {active_project['abstract_details']}
@@ -289,14 +256,12 @@ else:
                             {raw_project_context}
                             """
                             
-                            # Multi-Stage verification loop
                             response = client.models.generate_content(
                                 model='gemini-2.5-flash',
                                 contents=ieee_prompt
                             )
                             compiled_text = response.text
                             
-                            # Draw system chart/graph using numerical inputs
                             st.write("📊 Plotting Performance Metric Visualizations...")
                             fig, ax = plt.subplots(figsize=(6, 3.5))
                             ax.plot([1, 2, 3, 4], [85, 89, 93, 96], marker='s', linestyle='--', color='black', label='Optimization Factor')
@@ -310,23 +275,17 @@ else:
                             plt.savefig(img_stream, format='png', bbox_inches='tight')
                             img_stream.seek(0)
                             
-                            # Write file directly into standard docx styles
                             st.write("📑 Building IEEE Document Container Structure...")
                             doc = Document()
                             
-                            # Title Section
                             title_p = doc.add_paragraph()
                             title_run = title_p.add_run(f"{project_selection.upper()}")
                             title_run.bold = True
                             title_run.font.size = Inches(0.3)
                             
                             doc.add_paragraph("IEEE Academic Research Engine Pipeline Output Document\nAuthor: Personal AI OS Workspace User Context\n")
-                            
-                            # Body Content
                             doc.add_heading("I. ANALYSIS & METHODOLOGY", level=1)
                             doc.add_paragraph(compiled_text)
-                            
-                            # Embed Visualization Figure
                             doc.add_heading("II. PERFORMANCE METRICS & VISUALIZATIONS", level=1)
                             doc.add_paragraph("Figure 1 describes the empirical data trends parsed during systemic hardware validation procedures execution loop.")
                             doc.add_picture(img_stream, width=Inches(5.5))
