@@ -4,6 +4,7 @@ from google.genai import types
 import json
 import os
 import io
+import zipfile
 import matplotlib.pyplot as plt
 from docx import Document
 from docx.shared import Inches
@@ -23,28 +24,26 @@ def load_profile_from_db(profile_key):
         st.error(f"Cloud DB Read Error: {e}")
     return None
 
-def save_profile_to_db(profile_key, api_key, context, research_projects):
+def save_profile_to_db(profile_key, api_key, context, research_projects, chat_history):
     try:
         payload = {
             "profile_key": profile_key,
             "api_key": api_key,
             "context": context,
-            "research_projects": research_projects
+            "research_projects": research_projects,
+            "chat_history": chat_history
         }
         supabase.table("user_profiles").upsert(payload).execute()
     except Exception as e:
-        st.error(f"Cloud DB Write Error: {e}")
+        pass # Silent fail to prevent interrupting the chat UI flow
 
 # --- INITIAL APP CONFIG ---
-st.set_page_config(page_title="Personal AI OS v3", page_icon="🧠", layout="centered")
-st.title("🧠 Personal AI OS v3.0")
+st.set_page_config(page_title="Personal AI OS v4", page_icon="🧠", layout="centered")
+st.title("🧠 Personal AI OS v4.0")
 
 # --- PROFILE SECURITY GATEWAY ---
 if "authenticated_profile" not in st.session_state:
     st.session_state.authenticated_profile = None
-    st.session_state.current_key = ""
-    st.session_state.current_context = ""
-    st.session_state.research_projects = {}
 
 if st.session_state.authenticated_profile is None:
     st.subheader("🔒 Secure Profile Gateway")
@@ -58,14 +57,16 @@ if st.session_state.authenticated_profile is None:
                 st.session_state.current_key = db_record.get("api_key", "")
                 st.session_state.current_context = db_record.get("context", "")
                 st.session_state.research_projects = db_record.get("research_projects", {})
+                st.session_state.messages = db_record.get("chat_history", [])
             else:
                 initial_projects = {}
-                save_profile_to_db(entered_password, "", "Initialize your custom background here...", initial_projects)
+                initial_chat = []
+                save_profile_to_db(entered_password, "", "Initialize context...", initial_projects, initial_chat)
                 st.session_state.authenticated_profile = entered_password
                 st.session_state.current_key = ""
-                st.session_state.current_context = "Initialize your custom background here..."
+                st.session_state.current_context = "Initialize context..."
                 st.session_state.research_projects = initial_projects
-            st.session_state.messages = []
+                st.session_state.messages = initial_chat
             st.rerun()
     st.stop()
 
@@ -77,73 +78,120 @@ with st.sidebar:
     context_input = st.text_area("Master Persona Context", value=st.session_state.current_context, height=120)
     
     if st.button("💾 Save Settings Permanently"):
-        save_profile_to_db(st.session_state.authenticated_profile, api_key_input, context_input, st.session_state.research_projects)
         st.session_state.current_key = api_key_input
         st.session_state.current_context = context_input
-        st.success("Indestructible Cloud Database Updated!")
+        save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
+        st.success("Database Updated!")
         
     st.write("---")
     st.subheader("🏎️ Cognitive Architecture")
-    architecture = st.selectbox("Choose Engine Strategy:", ["Standard Conversation", "Multi-Agent Critic Loop", "IEEE Research Engine"])
+    architecture = st.selectbox(
+        "Choose Engine Strategy:", 
+        ["Standard Conversation", "VLSI & Firmware Sandbox", "IEEE Research Engine"]
+    )
     
     if st.button("🚪 Lock Workspace"):
         st.session_state.authenticated_profile = None
         st.rerun()
 
 # --- ARCHITECTURE ROUTING ---
-if architecture != "IEEE Research Engine":
-    st.subheader("📁 Hardware & Datasheet Vision")
-    uploaded_file = st.file_uploader("Drop PDF datasheets, schematics, or reference materials here", type=["pdf", "png", "jpg", "jpeg"])
-
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
+if architecture == "Standard Conversation":
+    st.subheader("💬 Persistent Memory Chat")
+    
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    st.subheader("🎙️ Voice Command Input")
-    audio_input = st.audio_input("Record a voice note command")
-    prompt = st.chat_input("Or type an input vector prompt...")
-
-    if audio_input and not prompt:
-        prompt = "Transcribe and answer this audio command completely."
+    prompt = st.chat_input("Ask a question...")
 
     if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt if not audio_input else "🎤 [Voice Input Context]"})
+        st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
-            st.markdown(prompt if not audio_input else "🎤 *Sent a voice command recording...*")
+            st.markdown(prompt)
 
         if not st.session_state.current_key:
-            st.error("⚠️ Active workspace lacks valid Gemini authorization credentials.")
+            st.error("⚠️ API Key required.")
         else:
             with st.chat_message("model"):
                 try:
                     client = genai.Client(api_key=st.session_state.current_key)
-                    system_instruction = f"You are an elite AI companion. Context:\n{st.session_state.current_context}"
-                    contents_payload = []
+                    conversation_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-10:]])
+                    full_prompt = f"System: {st.session_state.current_context}\n\n{conversation_history}\nModel:"
                     
-                    if audio_input:
-                        contents_payload.append(types.Part.from_bytes(data=audio_input.read(), mime_type="audio/wav"))
-                    if uploaded_file:
-                        contents_payload.append(types.Part.from_bytes(data=uploaded_file.getvalue(), mime_type=uploaded_file.type))
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=full_prompt
+                    )
+                    output_text = response.text
+                    st.markdown(output_text)
                     
-                    conversation_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-4:]])
-                    contents_payload.append(f"{conversation_history}\nInput: {prompt}")
-                    
-                    with st.spinner("Processing..."):
-                        response = client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=contents_payload,
-                            config=types.GenerateContentConfig(system_instruction=system_instruction)
-                        )
-                        output_text = response.text
-                        st.markdown(output_text)
                     st.session_state.messages.append({"role": "model", "content": output_text})
+                    save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-else:
+elif architecture == "VLSI & Firmware Sandbox":
+    st.subheader("🛠️ Electronic Design Automation (EDA) Engine")
+    st.info("Generates production-ready Verilog modules and automated testbenches.")
+    
+    hw_prompt = st.text_area(
+        "Hardware Design Requirements:", 
+        placeholder="e.g., Design a sequence detector for 1011 using a Moore state machine, or write a Verilog UART transmitter module with a 115200 baud rate."
+    )
+    
+    if st.button("⚡ Generate & Package Firmware"):
+        if not st.session_state.current_key:
+            st.error("⚠️ API Key required.")
+        elif hw_prompt:
+            with st.spinner("Compiling Verilog Logic and Testbench Architecture..."):
+                client = genai.Client(api_key=st.session_state.current_key)
+                system_instruction = """
+                You are a Senior VLSI Engineer. The user will provide a hardware specification. 
+                You must output exactly valid JSON with three keys: 
+                "module_name" (the name of the top module, e.g. 'uart_tx'), 
+                "verilog_code" (the raw Verilog code for the module), 
+                "testbench_code" (the raw Verilog code for the exhaustive testbench). 
+                Do not include markdown blocks like ```json in the output. Just the raw JSON format.
+                """
+                
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=hw_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json"
+                    )
+                )
+                
+                try:
+                    hw_data = json.loads(response.text)
+                    mod_name = hw_data.get("module_name", "design")
+                    v_code = hw_data.get("verilog_code", "")
+                    tb_code = hw_data.get("testbench_code", "")
+                    
+                    st.success("Compilation Successful!")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.text_area(f"{mod_name}.v", value=v_code, height=300)
+                    with col2:
+                        st.text_area(f"{mod_name}_tb.v", value=tb_code, height=300)
+                    
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        zip_file.writestr(f"{mod_name}.v", v_code)
+                        zip_file.writestr(f"{mod_name}_tb.v", tb_code)
+                    
+                    st.download_button(
+                        label="⬇️ Download VLSI Project Archive (.zip)",
+                        data=zip_buffer.getvalue(),
+                        file_name=f"{mod_name}_project.zip",
+                        mime="application/zip"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to parse generation. Ensure model output is strict JSON. Error: {e}")
+
+elif architecture == "IEEE Research Engine":
     st.subheader("🎓 Strict IEEE Research Engine")
     
     project_names = list(st.session_state.research_projects.keys())
@@ -160,7 +208,7 @@ else:
                     "experimental_results": "",
                     "conclusion_points": ""
                 }
-                save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+                save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
                 st.success(f"Workspace for '{new_name}' generated!")
                 st.rerun()
         st.stop()
@@ -172,7 +220,7 @@ else:
         abs_in = st.text_area("What problem does this project solve?", value=active_project["abstract_details"], key="abs_in")
         if st.button("Save Step 1 Data"):
             st.session_state.research_projects[project_selection]["abstract_details"] = abs_in
-            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
             st.success("Saved Step 1 data to Cloud.")
             st.rerun()
             
@@ -180,7 +228,7 @@ else:
         intro_in = st.text_area("What technologies/prior works are you using?", value=active_project["introduction_points"], key="intro_in")
         if st.button("Save Step 2 Data"):
             st.session_state.research_projects[project_selection]["introduction_points"] = intro_in
-            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
             st.success("Saved Step 2 data to Cloud.")
             st.rerun()
             
@@ -188,7 +236,7 @@ else:
         hw_in = st.text_area("Detail your system architecture. Explain your connections, integrated hardware-software systems, Edge AI models, MATLAB optimization scripts, and precise workflows step-by-step.", value=active_project["hardware_methodology"], key="hw_in")
         if st.button("Save Step 3 Data"):
             st.session_state.research_projects[project_selection]["hardware_methodology"] = hw_in
-            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
             st.success("Saved Step 3 data to Cloud.")
             st.rerun()
             
@@ -196,7 +244,7 @@ else:
         res_in = st.text_area("What are your numerical results or outputs?", value=active_project["experimental_results"], key="res_in")
         if st.button("Save Step 4 Data"):
             st.session_state.research_projects[project_selection]["experimental_results"] = res_in
-            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
             st.success("Saved Step 4 data to Cloud.")
             st.rerun()
             
@@ -204,7 +252,7 @@ else:
         con_in = st.text_area("What is the final takeaway?", value=active_project["conclusion_points"], key="con_in")
         if st.button("Save Step 5 Data"):
             st.session_state.research_projects[project_selection]["conclusion_points"] = con_in
-            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects)
+            save_profile_to_db(st.session_state.authenticated_profile, st.session_state.current_key, st.session_state.current_context, st.session_state.research_projects, st.session_state.messages)
             st.success("Saved Step 5 data to Cloud.")
             st.rerun()
 
@@ -223,7 +271,6 @@ else:
         st.warning("🔒 Compilation Locked. Please complete all 5 modules.")
     else:
         st.success("🔓 Data complete! You can now activate the paper synthesis matrix.")
-        
         paper_ready_toggle = st.toggle("✨ ACTIVATE IEEE PAPER READY STATUS", value=False)
         
         if paper_ready_toggle:
